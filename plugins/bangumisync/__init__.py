@@ -243,7 +243,7 @@ class BangumiSync(_PluginBase):
                     break
 
             for info in ep_info:
-                # Second try to matfch episode number
+                # Second try to match episode number
                 if info.get("sort") == episode:
                     found_episode_id = info["id"]
                     break
