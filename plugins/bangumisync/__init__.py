@@ -20,7 +20,7 @@ class BangumiSync(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/bangumi.jpg"
     # 插件版本
-    plugin_version = "1.8.5"
+    plugin_version = "1.8.6"
     # 插件作者
     plugin_author = "honue,happyTonakai"
     # 作者主页
@@ -57,7 +57,7 @@ class BangumiSync(_PluginBase):
             if settings.PROXY:
                 self._request.proxies.update(settings.PROXY)
             self.__update_config()
-            logger.debug("Bangumi在看同步插件初始化成功")
+            logger.debug(f"Bangumi在看同步插件 v{BangumiSync.plugin_version} 初始化成功")
 
     @eventmanager.register(EventType.WebhookMessage)
     def hook(self, event: Event):
@@ -96,12 +96,14 @@ class BangumiSync(_PluginBase):
                 self._prefix = f"{title} 第{season_id}季 第{episode_id}集"
                 unique_id = int(tmdb_id) if tmdb_id else None
                 # 使用 tmdb airdate 来定位季，提高准确率
-                subject_name, subject_id = self.get_subjectid_by_title(title, season_id, episode_id, unique_id)
+                subject_id, subject_name, original_episode_name = self.get_subjectid_by_title(
+                    title, season_id, episode_id, unique_id
+                )
                 if subject_id is None:
                     return
-                logger.info(f"{self._prefix}: {title} => {subject_name} https://bgm.tv/subject/{subject_id}")
+                logger.info(f"{self._prefix}: {title} {original_episode_name} => {subject_name} https://bgm.tv/subject/{subject_id}")
 
-                self.sync_watching_status(subject_id, episode_id)
+                self.sync_watching_status(subject_id, episode_id, original_episode_name)
 
         except Exception as e:
             logger.warning(f"同步在看状态失败: {e}")
@@ -116,9 +118,9 @@ class BangumiSync(_PluginBase):
         :param unique_id: 集唯一 id
         """
         logger.debug(f"{self._prefix}: 尝试使用 bgm api 来获取 subject id...")
-        tmdb_id, original_name = self.get_tmdb_id(title)
+        tmdb_id, original_name, original_language = self.get_tmdb_id(title)
         if tmdb_id is not None:
-            start_date, end_date = self.get_airdate(tmdb_id, season, episode, unique_id)
+            start_date, end_date, original_episode_name = self.get_airdate_and_ep_name(tmdb_id, season, episode, unique_id, original_language)
             post_json = {
                 "keyword": original_name,
                 "sort": "match",
@@ -139,7 +141,7 @@ class BangumiSync(_PluginBase):
         year = data["date"][:4]
         name_cn = f"{data['name_cn']} ({year})"
         subject_id = data["id"]
-        return name_cn, subject_id
+        return subject_id, name_cn, original_episode_name
 
     @cached(TTLCache(maxsize=100, ttl=3600))
     def get_tmdb_id(self, title: str):
@@ -153,25 +155,27 @@ class BangumiSync(_PluginBase):
             return None, None
         for result in results:
             if 16 in result.get("genre_ids"):
-                return result.get("id"), result.get("original_name")
+                return result.get("id"), result.get("original_name"), result.get("original_language")
 
     @cached(TTLCache(maxsize=100, ttl=3600))
-    def get_airdate(self, tmdbid: int, season: int, episode: int, unique_id: int | None):
+    def get_airdate_and_ep_name(self, tmdbid: int, season: int, episode: int, unique_id: int | None, original_language: str):
         """
         通过tmdb 获取 airdate 定位季
         :param tmdbid: tmdb id
         :param season: 季号
         :param episode: 集号
         :param unique_id: 集唯一 id
+        :param original_language: 原始语言
         """
         def get_tv_season_detail(tmdbid, season) -> List[dict]:
             seasons = [season, 1]
             for season in seasons:
-                url = f"https://api.tmdb.org/3/tv/{tmdbid}/season/{season}?language=zh-CN&api_key={self._tmdb_key}"
+                url = f"https://api.tmdb.org/3/tv/{tmdbid}/season/{season}?language={original_language}&api_key={self._tmdb_key}"
                 resp = requests.get(url, proxies=settings.PROXY).json()
                 if resp and resp.get("success") is False:
                     continue
                 return resp
+            return None
 
         logger.debug(f"{self._prefix}: 尝试使用 tmdb api 来获取 airdate...")
         resp = get_tv_season_detail(tmdbid, season)
@@ -184,25 +188,37 @@ class BangumiSync(_PluginBase):
             logger.warning(f"{self._prefix}: 该季度没有剧集信息")
             return None, None
         # 初始化播出日期
-        air_date = resp.get("air_date")
-        for ep in episodes:
-            if air_date is None:
-                air_date = ep.get("air_date")
-            if self._uniqueid_match and unique_id:
+        found_episode = None
+        # Consider the case where the episode might not be found in the loop
+        # if ep.get("episode_type") in ["finale", "mid_season"]:
+        if self._uniqueid_match and unique_id:
+            for ep in episodes:
                 if ep.get("id") == unique_id:
+                    found_episode = ep
                     break
-            elif ep.get("episode_number") == episode:
-                break
-            if ep.get("episode_type") in ["finale", "mid_season"]:
-                air_date = None
+        else:
+            for ep in episodes:
+                if ep.get("episode_number") == episode:
+                    found_episode = ep
+                    break
+        air_date = found_episode.get("air_date", None) if found_episode else None
+
+        if not found_episode or not air_date:
+            print(f"{self._prefix}: 未找到匹配的TMDB剧集或播出日期")
+            return None, None
+
+
+        # 原始单集名称，用于和bgm匹配
+        original_episode_name = found_episode.get("name")
+
         air_date = datetime.datetime.strptime(air_date, "%Y-%m-%d").date()
         # 时差原因可能有偏差，且tmdb不计算第0话的首播时间
         start_date = air_date - datetime.timedelta(days=15)
         end_date = air_date + datetime.timedelta(days=15)
-        return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+        return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"), original_episode_name
 
     @cached(TTLCache(maxsize=10, ttl=600))
-    def sync_watching_status(self, subject_id, episode):
+    def sync_watching_status(self, subject_id, episode, original_episode_name):
         # 获取uid
         if not self._bgm_uid:
             resp = self._request.get(url="https://api.bgm.tv/v0/me")
@@ -217,28 +233,36 @@ class BangumiSync(_PluginBase):
         # 获取episode id
         ep_info = self.get_episodes_info(subject_id)
 
-        found = False
-        for info in ep_info:
-            if info["sort"] == episode:
-                episode_id = info["id"]
-                found = True
-                break
-
-        if not found:
+        found_episode_id = None
+        last_episode = False
+        if ep_info:
             for info in ep_info:
-                if info["ep"] == episode:
-                    episode_id = info["id"]
-                    found = True
+                # First try to match by original episode name
+                if info.get("name") == original_episode_name:
+                    found_episode_id = info["id"]
                     break
 
-        last_episode = info == ep_info[-1]
+            for info in ep_info:
+                # Second try to matfch episode number
+                if info.get("sort") == episode:
+                    found_episode_id = info["id"]
+                    break
 
-        if not found:
+            if found_episode_id is None:
+                # Fallback to checking the 'ep' field if 'sort' didn't match
+                for info in ep_info:
+                    if info.get("ep") == episode:
+                        found_episode_id = info["id"]
+                        break
+
+        if not found_episode_id:
             logger.warning(f"{self._prefix}: 未找到episode，可能因为TMDB和BGM的episode映射关系不一致")
             return
 
+        last_episode = info == ep_info[-1]
+
         # 点格子
-        self.update_episode_status(episode_id)
+        self.update_episode_status(found_episode_id)
 
         # 最后一集，更新状态为看过
         if last_episode:
