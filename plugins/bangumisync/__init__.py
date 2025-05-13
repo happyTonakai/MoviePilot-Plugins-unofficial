@@ -57,7 +57,7 @@ class BangumiSync(_PluginBase):
             if settings.PROXY:
                 self._request.proxies.update(settings.PROXY)
             self.__update_config()
-            logger.debug(f"Bangumi在看同步插件 v{BangumiSync.plugin_version} 初始化成功")
+            logger.info(f"Bangumi在看同步插件 v{BangumiSync.plugin_version} 初始化成功")
 
     @eventmanager.register(EventType.WebhookMessage)
     def hook(self, event: Event):
@@ -119,27 +119,32 @@ class BangumiSync(_PluginBase):
         """
         logger.debug(f"{self._prefix}: 尝试使用 bgm api 来获取 subject id...")
         tmdb_id, original_name, original_language = self.get_tmdb_id(title)
+        original_episode_name = None
+        post_json = {
+            "keyword": title,
+            "sort": "match",
+            "filter": {"type": [2]},
+        }
         if tmdb_id is not None:
-            start_date, end_date, original_episode_name = self.get_airdate_and_ep_name(tmdb_id, season, episode, unique_id, original_language)
-            post_json = {
-                "keyword": original_name,
-                "sort": "match",
-                "filter": {"type": [2], "air_date": [f">={start_date}", f"<={end_date}"]},
-            }
-        else:
-            post_json = {
-                "keyword": title,
-                "sort": "match",
-                "filter": {"type": [2]},
-            }
+            start_date, end_date, original_episode_name = self.get_airdate_and_ep_name(
+                tmdb_id, season, episode, unique_id, original_language
+            )
+            if start_date is not None and end_date is not None:
+                post_json = {
+                    "keyword": original_name,
+                    "sort": "match",
+                    "filter": {"type": [2], "air_date": [f">={start_date}", f"<={end_date}"]},
+                }
+
         url = f"https://api.bgm.tv/v0/search/subjects"
         resp = self._request.post(url, json=post_json).json()
         if not resp.get("data"):
             logger.warning(f"{self._prefix}: 未找到{title}的bgm条目")
-            return None, None
+            return None, None, None
         data = resp.get("data")[0]
         year = data["date"][:4]
-        name_cn = f"{data['name_cn']} ({year})"
+        name_cn = data["name_cn"] or data["name"]
+        name_cn = f"{name_cn} ({year})"
         subject_id = data["id"]
         return subject_id, name_cn, original_episode_name
 
@@ -170,7 +175,7 @@ class BangumiSync(_PluginBase):
         def get_tv_season_detail(tmdbid: int, season_id: int) -> dict:
             url = f"https://api.tmdb.org/3/tv/{tmdbid}/season/{season_id}?language={original_language}&api_key={self._tmdb_key}"
             resp = self._request.get(url).json()
-            if resp and resp.get("success"):
+            if resp and resp.get("episodes"):
                 return resp
 
             logger.debug(f"{self._prefix}: 无法通过季号获取TMDB季度信息，尝试通过episode group获取")
@@ -204,34 +209,28 @@ class BangumiSync(_PluginBase):
         if not episodes:
             logger.warning(f"{self._prefix}: 该季度没有剧集信息")
             return None, None, None
-        # 初始化播出日期
-        found_episode = None
-        # Consider the case where the episode might not be found in the loop
-        # if ep.get("episode_type") in ["finale", "mid_season"]:
-        if self._uniqueid_match and unique_id:
-            for ep in episodes:
-                if ep.get("id") == unique_id:
-                    found_episode = ep
-                    break
-        else:
-            # First try with order + 1, in case ep["order"] is not available
-            for ep in episodes:
-                if ep.get("order", -99) + 1 == episode:
-                    found_episode = ep
-                    break
-            # Second try with episode number
-            for ep in episodes:
-                if ep.get("episode_number") == episode:
-                    found_episode = ep
-                    break
-        air_date = found_episode.get("air_date", None) if found_episode else None
 
-        if not found_episode or not air_date:
+        # 初始化播出日期
+        air_date = resp.get("air_date")
+        for ep in episodes:
+            if air_date is None:
+                air_date = ep.get("air_date")
+            if self._uniqueid_match and unique_id:
+                if ep.get("id") == unique_id:
+                    break
+            elif ep.get("order", -99) + 1 == episode:
+                break
+            elif ep.get("episode_number") == episode:
+                break
+            if ep.get("episode_type") in ["finale", "mid_season"]:
+                air_date = None
+
+        if not air_date:
             logger.warning(f"{self._prefix}: 未找到匹配的TMDB剧集或播出日期")
             return None, None, None
 
         # 原始单集名称，用于和bgm匹配
-        original_episode_name = found_episode.get("name")
+        original_episode_name = ep.get("name")
 
         air_date = datetime.datetime.strptime(air_date, "%Y-%m-%d").date()
         # 时差原因可能有偏差，且tmdb不计算第0话的首播时间
