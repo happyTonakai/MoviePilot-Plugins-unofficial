@@ -94,7 +94,11 @@ class BangumiSync(_PluginBase):
                 # 季 集
                 season_id, episode_id = map(int, [event_info.season_id, event_info.episode_id])
                 self._prefix = f"{title} 第{season_id}季 第{episode_id}集"
-                unique_id = int(tmdb_id) if tmdb_id else None
+                try:
+                    unique_id = int(tmdb_id)
+                except Exception:
+                    unique_id = None
+                
                 # 使用 tmdb airdate 来定位季，提高准确率
                 subject_id, subject_name, original_episode_name = self.get_subjectid_by_title(
                     title, season_id, episode_id, unique_id
