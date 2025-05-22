@@ -159,7 +159,7 @@ class BangumiSync(_PluginBase):
     def get_tmdb_id(self, title: str):
         logger.debug(f"{self._prefix}: 尝试使用 tmdb api 来获取 subject id...")
         url = f"https://api.tmdb.org/3/search/tv?query={title}&api_key={self._tmdb_key}"
-        ret = self._request.get(url).json()
+        ret = requests.get(url, proxies=settings.PROXIES).json()
         if ret.get("total_results"):
             results = ret.get("results")
         else:
@@ -181,14 +181,14 @@ class BangumiSync(_PluginBase):
         """
         def get_tv_season_detail(tmdbid: int, season_id: int) -> dict:
             url = f"https://api.tmdb.org/3/tv/{tmdbid}/season/{season_id}?language={original_language}&api_key={self._tmdb_key}"
-            resp = self._request.get(url).json()
+            resp = requests.get(url, proxies=settings.PROXIES).json()
             if resp and resp.get("episodes"):
                 return resp
 
             logger.debug(f"{self._prefix}: 无法通过季号获取TMDB季度信息，尝试通过episode group获取")
             # 通过季号查询失败，用户可能通过episode group刮削
             url = f"https://api.tmdb.org/3/tv/{tmdbid}/episode_groups?api_key={self._tmdb_key}"
-            resp = self._request.get(url).json()
+            resp = requests.get(url, proxies=settings.PROXIES).json()
             if resp and resp.get("results"):
                 # 有些番剧拥有多个Seasons结果，比如我独自升级，其中一个Seasons是将总集篇作为一集，因此我们选择episode_count最小的一个
                 seasons = [
@@ -197,7 +197,7 @@ class BangumiSync(_PluginBase):
                 if seasons:
                     season = min(seasons, key=lambda x: x.get("episode_count"))
                     url = f"https://api.tmdb.org/3/tv/episode_group/{season.get('id')}?language={original_language}&api_key={self._tmdb_key}"
-                    resp = self._request.get(url).json()
+                    resp = requests.get(url, proxies=settings.PROXIES).json()
                     if resp and resp.get("groups"):
                         for group in resp.get("groups"):
                             # 有些group的name并不仅是 f"Season {season}"，比如：Season 2 -Arise from the Shadow-
