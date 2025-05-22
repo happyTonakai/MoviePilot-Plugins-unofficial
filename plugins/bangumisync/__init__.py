@@ -142,6 +142,9 @@ class BangumiSync(_PluginBase):
 
         url = f"https://api.bgm.tv/v0/search/subjects"
         resp = self._request.post(url, json=post_json).json()
+        if resp.get("title") == "Unauthorized":
+            logger.warning(f"{self._prefix}: Unauthorized，请检查 bgm token：{resp.get('description')}")
+            return None, None, None
         if not resp.get("data"):
             logger.warning(f"{self._prefix}: 未找到{title}的bgm条目")
             return None, None, None
